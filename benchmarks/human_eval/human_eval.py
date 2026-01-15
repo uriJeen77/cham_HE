@@ -19,18 +19,16 @@ from benchmarks.human_eval.engine.execution import check_correctness
 from mistralai import Mistral
 from chameleon.distortion.engine import DistortionEngine
 from benchmarks.human_eval.prompts import (
-    GENERATION_SYSTEM_PROMPT as GENERATE_CODE_SYSTEM,
-    VALIDATION_MEGA_JUDGE_PROMPT as VALIDATION_PROMPT
+    get_distortion_prompt,
+    get_validation_prompt,
+    get_generation_prompt
 )
+from chameleon.distortion.constants import MIU_RULES
 
 
 # ============================================================================
 # PROMPTS
 # ============================================================================
-
-def get_validation_prompt(original: str, distorted: str) -> str:
-    """Generate the mega judge prompt for validation."""
-    return VALIDATION_PROMPT.format(original=original, distorted=distorted)
 
 
 def get_code_generation_messages(prompt: str) -> List[Dict[str, str]]:
@@ -152,11 +150,15 @@ class HumanEvalBenchmark(BaseBenchmark):
             original_prompt = task["prompt"]
             
             try:
-                # Run distortion
+                # Get centralized prompts
+                user_prompt = get_distortion_prompt(original_prompt, miu, n_distortions=1)
+                
+                # Run distortion with custom prompts
                 dist_result = distorter.distort_question(
                     question_id=task_id,
                     question=original_prompt,
-                    miu=miu
+                    miu=miu,
+                    custom_prompt=user_prompt,
                 )
                 
                 if dist_result.success:
@@ -222,12 +224,12 @@ class HumanEvalBenchmark(BaseBenchmark):
             
             try:
                 # Build judge prompt
-                judge_prompt = get_validation_prompt(original, distorted)
+                user_prompt = get_validation_prompt(original, distorted)
                 
                 # Call API
                 response = client.chat.complete(
                     model=model,
-                    messages=[{"role": "user", "content": judge_prompt}],
+                    messages=[{"role": "user", "content": user_prompt}],
                     response_format={"type": "json_object"}
                 )
                 
@@ -295,15 +297,18 @@ class HumanEvalBenchmark(BaseBenchmark):
                 if not task.get("distortion_success") or not task.get("validation_passed"):
                     task[code_field] = None
                     continue
-                prompt = task.get("distorted_prompt", "")
+                prompt = task["distorted_prompt"]
             else:
                 prompt = task["prompt"]
             
             try:
+                # Get full prompt from helper
+                full_prompt = get_generation_prompt(prompt)
+                
                 # Send request to Mistral
                 response = client.chat.complete(
                     model=model,
-                    messages=get_code_generation_messages(prompt),
+                    messages=[{"role": "user", "content": full_prompt}],
                     temperature=0.2
                 )
                 
@@ -313,7 +318,8 @@ class HumanEvalBenchmark(BaseBenchmark):
                 
                 task[code_field] = code
                 success_count += 1
-                self.logger.debug(f"  ✓ {task_id} - {prompt_type} code generated")
+                self.logger.info(f"  ✓ {task_id} - {prompt_type} code generated")
+                self.logger.debug(f"RAW GENERATED CODE:\n{code}")
                 
             except Exception as e:
                 task[code_field] = None
@@ -354,13 +360,15 @@ class HumanEvalBenchmark(BaseBenchmark):
             
             try:
                 # Try to parse the code
+                # The generated code should be a complete, standalone function
                 ast.parse(code)
                 task[status_field] = True
                 valid_count += 1
                 self.logger.debug(f"  ✓ {task_id} - {code_type} syntax valid")
             except SyntaxError as e:
                 task[status_field] = False
-                self.logger.debug(f"  ✗ {task_id} - {code_type} syntax error")
+                self.logger.warning(f"  ✗ {task_id} - {code_type} syntax error: {e}")
+                self.logger.debug(f"INVALID CODE:\n{code}")
         
         self.logger.info(f"✅ {valid_count}/{len(tasks)} {code_type} tasks have valid syntax\n")
         return tasks
@@ -514,15 +522,29 @@ class HumanEvalBenchmark(BaseBenchmark):
         distorted_results = []
         
         for task in tasks:
+            task_id = task["task_id"]
+            
             # Evaluate original code if syntax is valid
             if task.get("original_syntax_valid", False):
                 result = self.evaluate_completion(task, task["original_code"])
                 original_results.append(result)
+                if result["passed"]:
+                    self.logger.info(f"  ✓ {task_id} - ORIGINAL tests PASSED")
+                else:
+                    self.logger.warning(f"  ✗ {task_id} - ORIGINAL tests FAILED: {result.get('result', 'Unknown error')}")
+            else:
+                self.logger.debug(f"  ⊗ {task_id} - ORIGINAL code skipped (syntax invalid)")
             
             # Evaluate distorted code if syntax is valid
             if task.get("distorted_syntax_valid", False):
                 result_dist = self.evaluate_completion(task, task["distorted_code"])
                 distorted_results.append(result_dist)
+                if result_dist["passed"]:
+                    self.logger.info(f"  ✓ {task_id} - DISTORTED tests PASSED")
+                else:
+                    self.logger.warning(f"  ✗ {task_id} - DISTORTED tests FAILED: {result_dist.get('result', 'Unknown error')}")
+            else:
+                self.logger.debug(f"  ⊗ {task_id} - DISTORTED code skipped (syntax invalid)")
         
         # Calculate metrics
         original_metrics = self.calculate_metrics(original_results) if original_results else {"pass@1": 0.0}
@@ -584,7 +606,7 @@ def run_humaneval_pipeline(
     generation_model: str = "mistral-large-latest",
     validation_model: str = "mistral-large-latest",
     project_path: Optional[str] = None,
-    timeout: float = 3.0,
+    timeout: float = 12.0,
     k_values: Optional[List[int]] = None
 ) -> Dict[str, Any]:
     """

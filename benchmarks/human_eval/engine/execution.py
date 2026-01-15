@@ -24,35 +24,55 @@ def unsafe_execute(problem: Dict, completion: str, timeout: float, result):
         reliability_guard()
 
         # Construct the check program and run it.
-        check_program = (
-            problem["prompt"]
-            + completion
-            + "\n"
-            + problem["test"]
-            + "\n"
-            + f"check({problem['entry_point']})"
-        )
+        # If completion already contains the full function definition (starts with 'def'),
+        # don't prepend the prompt (which also has the def line)
+        if completion.strip().startswith('def'):
+            # Completion is standalone - use it directly
+            check_program = (
+                completion
+                + "\n"
+                + problem["test"]
+                + "\n"
+                + f"check({problem['entry_point']})"
+            )
+
+        else:
+            # Completion is just the body - prepend the prompt
+            check_program = (
+                problem["prompt"]
+                + completion
+                + "\n"
+                + problem["test"]
+                + "\n"
+                + f"check({problem['entry_point']})"
+            )
+
 
         try:
             exec_globals = {}
-            with swallow_io():
-                with time_limit(timeout):
-                    # WARNING
-                    # This program exists to execute untrusted model-generated code. Although
-                    # it is highly unlikely that model-generated code will do something overtly
-                    # malicious in response to this test suite, model-generated code may act
-                    # destructively due to a lack of model capability or alignment.
-                    # Users are strongly encouraged to sandbox this evaluation suite so that it
-                    # does not perform destructive actions on their host or network. For more
-                    # information on how OpenAI sandboxes its code, see the accompanying paper.
-                    # Once you have read this disclaimer and taken appropriate precautions,
-                    # uncomment the following line and proceed at your own risk:
-                    exec(check_program, exec_globals)
+            # TEMPORARILY DISABLED swallow_io() to see debug output
+            # with swallow_io():
+            with time_limit(timeout):
+                # WARNING
+                # This program exists to execute untrusted model-generated code. Although
+                # it is highly unlikely that model-generated code will do something overtly
+                # malicious in response to this test suite, model-generated code may act
+                # destructively due to a lack of model capability or alignment.
+                # Users are strongly encouraged to sandbox this evaluation suite so that it
+                # does not perform destructive actions on their host or network. For more
+                # information on how OpenAI sandboxes its code, see the accompanying paper.
+                # Once you have read this disclaimer and taken appropriate precautions,
+                # uncomment the following line and proceed at your own risk:
+                print(f"Executing check_program for {problem['task_id']}...")
+                exec(check_program, exec_globals)
             result.append("passed")
+            print(f"✓ {problem['task_id']} PASSED all tests!")
         except TimeoutException:
             result.append("timed out")
+            print(f"✗ {problem['task_id']} TIMED OUT")
         except BaseException as e:
             result.append(f"failed: {e}")
+            print(f"✗ {problem['task_id']} FAILED: {e}")
 
         # Needed for cleaning up.
         shutil.rmtree = rmtree
@@ -79,9 +99,13 @@ def check_correctness(
     p.join(timeout=timeout + 1)
     if p.is_alive():
         p.kill()
-
-    if not result:
         result.append("timed out")
+    elif not result:
+        # Process finished but no result was appended - likely a crash
+        if p.exitcode is not None and p.exitcode != 0:
+            result.append(f"process crashed (exit code: {p.exitcode})")
+        else:
+            result.append("timed outOrCrashed")
 
     return dict(
         task_id=problem["task_id"],
@@ -112,13 +136,13 @@ def time_limit(seconds: float):
         signal.setitimer(signal.ITIMER_REAL, 0)
 
 
-@contextlib.contextmanager
-def swallow_io():
-    stream = WriteOnlyStringIO()
-    with contextlib.redirect_stdout(stream):
-        with contextlib.redirect_stderr(stream):
-            with redirect_stdin(stream):
-                yield
+# @contextlib.contextmanager
+# def swallow_io():
+#     stream = WriteOnlyStringIO()
+#     with contextlib.redirect_stdout(stream):
+#         with contextlib.redirect_stderr(stream):
+#             with redirect_stdin(stream):
+#                 yield
 
 
 @contextlib.contextmanager

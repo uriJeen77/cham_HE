@@ -2,6 +2,8 @@
 LLM Prompts for Chameleon HumanEval Pipeline
 Centrally defined as global variables for easy maintainability and tuning.
 """
+from typing import Dict, Tuple, List
+from chameleon.distortion.constants import MIU_RULES
 
 # ============================================================================
 # DISTORTION PROMPTS
@@ -76,6 +78,29 @@ OUTPUT (exactly {n_distortions} numbered lines):
 
 [distortion] ... {n_distortions}. [distortion]
 """
+
+
+
+def get_distortion_prompt(question: str, miu: float, n_distortions: int = 1) -> str:
+    """
+    Generate a prompt for distorting a single HumanEval-style problem description.
+    
+    Args:
+        question: The original HumanEval prompt (including description and possibly code)
+        miu: Distortion intensity level
+        n_distortions: Number of unique distortions to generate
+    
+    Returns:
+        Formatted prompt string
+    """
+    rule = MIU_RULES.get(miu, MIU_RULES[0.5])
+    return get_distortion_prompt_template(
+        question=question,
+        miu=miu,
+        n_distortions=n_distortions,
+        rule=rule
+    )
+
 
 
 def get_batch_distortion_prompt_template(questions_text: str, miu: float, n_distortions: int, rule: str) -> str:
@@ -215,6 +240,13 @@ Respond ONLY with a valid JSON object. No preamble or markdown fences.
 """
 
 
+def get_validation_prompt(original: str, distorted: str) -> str:
+    """
+    Returns user_prompt for MegaJudge validation.
+    """
+    return VALIDATION_MEGA_JUDGE_PROMPT.format(original=original, distorted=distorted)
+
+
 # ============================================================================
 # GENERATION PROMPTS
 # ============================================================================
@@ -236,6 +268,13 @@ TEMPLATE ADHERENCE: Use the exact function name and argument names provided in t
 IMPORTS: Include any necessary imports at the very top if they are required for the logic (e.g., import math or from typing import List).
 
 PYTHON CODE:"""
+
+
+def get_generation_prompt(prompt: str) -> str:
+    """
+    Returns user_prompt for code generation.
+    """
+    return GENERATION_SYSTEM_PROMPT + "\n\n" + prompt
 
 
 # ============================================================================
