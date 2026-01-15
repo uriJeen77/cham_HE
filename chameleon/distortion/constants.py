@@ -73,90 +73,39 @@ def calculate_temperature(miu: float) -> float:
 
 # ============================================================================
 # Prompt Templates
+# Note: These are generic fallbacks. Benchmarks should provide their own specific prompts.
 # ============================================================================
+DISTORTION_SYSTEM_PROMPT = """You are a distortion expert. 
+Your task is to create variations of given prompts while preserving their core logic and requirements."""
 
-DISTORTION_SYSTEM_PROMPT = """You are a semantic distortion expert for programming benchmarks. 
-Your task is to create lexically distorted versions of HumanEval-style coding problem descriptions 
-while preserving the required function behavior and all reference tests.
-
-DATA SOURCE ARCHITECTURE:
-You are processing a JSON-Lines (JSONL) row with the following fields:
-- "task_id": Unique identifier (e.g., "HumanEval/20")
-- "prompt": The problem stem. This contains:
-    1. Python imports (optional)
-    2. A SINGLE function definition line: "def <name>(...)->...:"
-    3. A triple-quoted docstring block (\"\"\" ... \"\"\") indented under the function.
-    **THIS IS THE ONLY FIELD YOU TARGET.** You must output a modified version of this "prompt" field.
-- "entry_point": The function name to call (e.g., "find_closest_elements"). DO NOT TOUCH.
-- "canonical_solution": The reference implementation. DO NOT TOUCH.
-- "test": The unit test assertions. DO NOT TOUCH.
-
-CRITICAL RULES:
-1. TARGET SCOPE:
-   - You are ONLY rewriting the natural-language description inside the triple-quoted docstring within the "prompt" field.
-
-2. PRESERVATION (STRICT):
-   - **Function Signature**: The `def function_name(...):` line MUST remain EXACTLY the same.
-   - **Structure**: Imports, definition line, indentation, and docstring delimiters must happen EXACTLY as in the original.
-   - **Examples**: Inside the docstring, NEVER modify lines starting with `>>>` or their corresponding output lines.
-   - **Code**: NEVER modify any Python code, variable names, or logic.
-
-3. DISTORTION (Natural Language Only):
-   - Rewrite the explanation text inside the docstring.
-   - Use synonyms, sentence restructuring, and paraphrasing.
-   - NEVER start with preambles like "Here are...".
-   - NEVER use markdown formatting (no **, ##, or ``` ).
-   - Output exactly the requested number of distortions.
-
-Your goal is to produce a valid replacement for the "prompt" field that tests if a model can still solve the problem when the description is phrased differently."""
 
 
 def get_distortion_prompt(question: str, miu: float, n_distortions: int) -> str:
     """
-    Generate a prompt for distorting a single HumanEval-style problem description.
-
+    Generic distortion prompt (fallback for benchmarks that don't provide custom prompts).
+    For HumanEval, use the specific version in benchmarks.human_eval.prompts instead.
+    
     Args:
-        question: The original HumanEval prompt (including description and possibly code)
+        question: The original prompt text
         miu: Distortion intensity level
         n_distortions: Number of unique distortions to generate
-
+    
     Returns:
         Formatted prompt string
     """
     rule = MIU_RULES.get(miu, MIU_RULES[0.5])
-
-    return f"""Distort this HumanEval-style programming task description {n_distortions} unique ways at μ={miu}.
+    return f"""Distort this prompt {n_distortions} unique ways at μ={miu} intensity level.
 
 DISTORTION RULE for μ={miu}: {rule}
 
-ORIGINAL PROMPT: {question}
+ORIGINAL: {question}
 
-STRICT REQUIREMENTS:
-
-SEMANTIC INVARIANCE: The logic, requirements, and constraints must remain 100% identical to the original. The distorted prompt must describe the exact same mathematical or algorithmic logic.
-
-STRUCTURAL VARIATION: Do not just swap words for synonyms. Change the sentence structure, use negations of opposites (e.g., "even" becomes "not odd"), or describe the process from a different perspective (e.g., "return the largest" becomes "exclude all elements except the maximum").
-
-TEMPLATE PRESERVATION: The HumanEval template MUST be preserved exactly: • Keep all Python import lines exactly as given. • Keep the function definition line (def ...(...)->...) exactly as given. • Keep the triple-quoted docstring delimiters (\"\"\" ... \"\"\") and indentation exactly as given.
-
-DOCSTRING INTEGRITY: • Inside the docstring, you may ONLY modify the natural-language explanation sentences. • DO NOT modify lines that start with \">>>\", nor the example output lines that follow them.
-
-CODE INTEGRITY: • If any Python code is present (signatures, type hints, examples, asserts), copy that code EXACTLY with NO modifications. • Do NOT change function names, argument names, return types, or literal values.
-
-NO FORMATTING: NO leetspeak, NO random characters, NO markdown formatting (no **, ##, or ```).
-
-CLEAN OUTPUT: NO preambles like "Here are...". Output only the numbered list.
-
-TEST COMPATIBILITY: The reference tests for this task must still pass perfectly after these distortions.
-
-FOLLOW THE μ={miu} RULE EXACTLY.
-
-OUTPUT (exactly {n_distortions} numbered lines):
-
-[distortion]
-
-[distortion] ... {n_distortions}. [distortion]
+REQUIREMENTS:
+1. Preserve semantic logic.
+2. Follow rule for μ={miu}.
+3. Output list of {n_distortions} distortions.
 """
+
 
 
 def get_batch_distortion_prompt(questions: List[Dict[str, str]], miu: float, n_distortions: int) -> str:

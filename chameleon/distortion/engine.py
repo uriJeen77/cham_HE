@@ -19,6 +19,7 @@ This file is preserved for:
 import os
 import time
 import re
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
@@ -118,6 +119,8 @@ class BaseDistortionEngine(ABC):
         question: str,
         miu: float,
         distortion_index: int = 0,
+        custom_prompt: Optional[str] = None,
+        system_prompt: Optional[str] = None,
         answer_options: Optional[str] = None,
         correct_answer: Optional[str] = None,
     ) -> DistortionResult:
@@ -147,12 +150,17 @@ class BaseDistortionEngine(ABC):
                 success=True,
             )
 
-        # For HumanEval-style prompts we request exactly ONE distortion
-        prompt = get_distortion_prompt(
-            question=question,
-            miu=miu,
-            n_distortions=1,
-        )
+        if custom_prompt:
+            prompt = custom_prompt
+        else:
+            # Fallback for backward compatibility or default behavior
+            # Now we use the version from constants (which we will keep for simple cases)
+            from chameleon.distortion.constants import get_distortion_prompt
+            prompt = get_distortion_prompt(
+                question=question,
+                miu=miu,
+                n_distortions=1,
+            )
 
         # === LIVE BLOCK START: Local/remote model generation ===
         try:
