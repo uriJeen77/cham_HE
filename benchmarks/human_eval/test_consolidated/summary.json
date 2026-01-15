@@ -1,0 +1,16 @@
+{
+  "total_tasks": 3,
+  "distortion_successful": 3,
+  "validation_passed": 3,
+  "original_code_generated": 3,
+  "distorted_code_generated": 3,
+  "original_syntax_valid": 3,
+  "distorted_syntax_valid": 3,
+  "original_metrics": {
+    "pass@1": 0.0
+  },
+  "distorted_metrics": {
+    "pass@1": 0.0
+  },
+  "miu": 0.6
+}

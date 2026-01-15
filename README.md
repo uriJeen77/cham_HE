@@ -111,18 +111,33 @@ Generates charts and reports in `Projects/MyProject/results/analysis/`.
 
 ```
 Chameleon/
-├── chameleon/                 # Core Framework
-│   ├── distortion/            # Paraphrasing logic (Mistral/Local)
-│   ├── evaluation/            # Code execution & Pass@k calculation
-│   └── analysis/              # Data Science & Visualization
-├── Projects/                  # user workspaces
+├── chameleon/                          # Core Framework
+│   ├── benchmarks/                     # Benchmark implementations
+│   │   └── human_eval/                # ⭐ NEW: Modular HumanEval
+│   │       ├── steps/                 # Pipeline steps (Load, Distort, Validate, Generate, Evaluate)
+│   │       ├── utils/                 # Logging & Progress bars
+│   │       ├── models.py              # Type-safe data models
+│   │       ├── runner.py              # Main orchestrator
+│   │       └── README.md              # Architecture documentation
+│   ├── distortion/                    # Paraphrasing logic (Mistral/Local)
+│   ├── evaluation/                    # Code execution & Pass@k calculation
+│   └── analysis/                      # Data Science & Visualization
+│
+├── examples/                           # ⭐ NEW: Organized examples
+│   ├── modular/                       # New modular architecture examples
+│   │   ├── example_modular_pipeline.py  # 4 comprehensive examples
+│   │   └── test_modular_pipeline.py     # Test script (3 samples)
+│   └── legacy/                        # Original examples (for reference)
+│
+├── Projects/                          # User workspaces
 │   └── MyProject/
-│       ├── original_data/     # Input JSONL source
-│       ├── distorted_data/    # Paraphrased prompts
-│       ├── results/           # Execution logs & Analysis output
-│       └── config.yaml        # Project configuration
-├── cli.py                     # Main Entry Point
-└── toy_workflow_demo.py       # Simple end-to-end test script
+│       ├── original_data/            # Input JSONL source
+│       ├── distorted_data/           # Paraphrased prompts
+│       ├── results/                  # Execution logs & Analysis output
+│       └── config.yaml               # Project configuration
+│
+├── cli.py                             # Main Entry Point
+└── README.md                          # This file
 ```
 
 ## 📊 Understanding The Metrics

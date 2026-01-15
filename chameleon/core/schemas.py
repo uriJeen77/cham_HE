@@ -44,6 +44,12 @@ class DistortionEngineType(str, Enum):
     HUGGINGFACE = "huggingface"  # Use HuggingFace transformers
 
 
+class BenchmarkType(str, Enum):
+    """Supported benchmark types."""
+    HUMAN_EVAL = "human_eval"
+    # Future benchmarks (e.g., BIG-bench, MBPP) can be added here
+
+
 class DistortionEngineConfig(BaseModel):
     """
     Configuration for the distortion generation engine.
@@ -179,6 +185,7 @@ class ProjectConfig(BaseModel):
     modality: Modality
     model_name: str
     backend_type: BackendType
+    benchmark_type: BenchmarkType = Field(default=BenchmarkType.HUMAN_EVAL)
     description: Optional[str] = None
     
     # Paths (stored as strings for YAML serialization)
