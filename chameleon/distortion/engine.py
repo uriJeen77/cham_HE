@@ -157,12 +157,12 @@ class BaseDistortionEngine(ABC):
         # === LIVE BLOCK START: Local/remote model generation ===
         try:
             start_time = time.time()
-            raw_output = self.generate(prompt)
+            distorted = self.generate(prompt)
             latency_ms = (time.time() - start_time) * 1000.0
 
             # Clean up the response and extract the single distortion line
-            raw_output = raw_output.strip()
-            distorted = self._extract_single_distortion(raw_output)
+            
+            
 
             return DistortionResult(
                 question_id=question_id,
