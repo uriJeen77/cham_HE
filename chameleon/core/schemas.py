@@ -47,6 +47,7 @@ class DistortionEngineType(str, Enum):
 class BenchmarkType(str, Enum):
     """Supported benchmark types."""
     HUMAN_EVAL = "human_eval"
+    VQAV2 = "vqav2"
     # Future benchmarks (e.g., BIG-bench, MBPP) can be added here
 
 
