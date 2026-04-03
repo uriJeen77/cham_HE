@@ -5,7 +5,7 @@ A single-file implementation of the HumanEval robustness evaluation pipeline.
 This version consolidates all steps into one class for simplicity.
 """
 
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
 import json
 import os
@@ -14,6 +14,13 @@ import numpy as np
 import logging
 
 from chameleon.core.base import BaseBenchmark
+from benchmarks.base.types import (
+    Task,
+    DistortionPrompt,
+    BenchmarkValidationResult,
+    EvalResult,
+    BenchmarkMetrics,
+)
 from benchmarks.human_eval.engine.data import read_problems
 from benchmarks.human_eval.engine.execution import check_correctness
 from mistralai import Mistral
@@ -21,9 +28,12 @@ from chameleon.distortion.engine import DistortionEngine
 from benchmarks.human_eval.prompts import (
     get_distortion_prompt,
     get_validation_prompt,
-    get_generation_prompt
+    get_generation_prompt,
+    DISTORTION_SYSTEM_PROMPT,
+    GENERATION_SYSTEM_PROMPT,
 )
 from chameleon.distortion.constants import MIU_RULES
+from chameleon.distortion.validator import reconstruct_humaneval_prompt
 
 
 # ============================================================================
@@ -85,6 +95,123 @@ class HumanEvalBenchmark(BaseBenchmark):
             logger.addHandler(handler)
         
         return logger
+
+    # ========================================================================
+    # AbstractBenchmark interface — thin adapters over the existing pipeline
+    # ========================================================================
+
+    def load_data(self, data_path: str) -> List[Task]:
+        """Load HumanEval tasks and wrap each dict in a Task."""
+        raw = self.load_tasks(data_path)
+        return [Task(task_id=d["task_id"], data=d) for d in raw]
+
+    def get_field_to_distort(self) -> str:
+        return "prompt"
+
+    def get_distortion_prompt(self, task: Task, miu: float, n_distortions: int) -> DistortionPrompt:
+        """Build a HumanEval-specific distortion prompt for one task."""
+        user_prompt = get_distortion_prompt(
+            task.data["prompt"], miu, n_distortions=n_distortions
+        )
+        return DistortionPrompt(
+            system_prompt=DISTORTION_SYSTEM_PROMPT,
+            user_prompt=user_prompt,
+        )
+
+    def validate_distortion(
+        self,
+        original_text: str,
+        distorted_text: str,
+        task: Task,
+    ) -> BenchmarkValidationResult:
+        """Use the Mistral judge to verify semantic equivalence."""
+        api_key = os.getenv("MISTRAL_API_KEY")
+        if not api_key:
+            return BenchmarkValidationResult(is_valid=True, reason="MISTRAL_API_KEY not set — skipped")
+
+        client = Mistral(api_key=api_key)
+        model = self.config.get("validation_model", "mistral-large-latest")
+        try:
+            user_prompt = get_validation_prompt(original_text, distorted_text)
+            response = client.chat.complete(
+                model=model,
+                messages=[{"role": "user", "content": user_prompt}],
+                response_format={"type": "json_object"},
+            )
+            result = json.loads(response.choices[0].message.content)
+            equivalence = result.get("equivalence_level", "")
+            is_safe = result.get("is_safe_to_test", False)
+            is_valid = (equivalence == "Identical") and is_safe
+            return BenchmarkValidationResult(
+                is_valid=is_valid,
+                reason=result.get("analysis", equivalence),
+            )
+        except Exception as e:
+            return BenchmarkValidationResult(is_valid=False, reason=str(e))
+
+    def get_generation_prompt(self, task: Task) -> Tuple[str, str]:
+        """
+        Return (system_prompt, user_prompt) for the target LLM.
+
+        Calls reconstruct_humaneval_prompt to fix cases where the distortion
+        engine returned only the docstring body without the surrounding
+        function signature and imports.
+        """
+        original_prompt = task.data.get("prompt", "")
+        distorted = task.distorted_text if task.distorted_text is not None else original_prompt
+        final_prompt = reconstruct_humaneval_prompt(str(original_prompt), str(distorted))
+        return GENERATION_SYSTEM_PROMPT, final_prompt
+
+    def evaluate(self, task: Task, response: str) -> EvalResult:
+        """Run unit tests and return an EvalResult."""
+        timeout = self.config.get("timeout", self.config.get("evaluation", {}).get("timeout", 1.5))
+        try:
+            raw = check_correctness(task.data, response, timeout)
+            return EvalResult(
+                task_id=task.task_id,
+                is_correct=raw.get("passed", False),
+                metadata={"result": raw.get("result", "")},
+            )
+        except Exception as e:
+            return EvalResult(
+                task_id=task.task_id,
+                is_correct=False,
+                metadata={"result": f"Error: {e}"},
+            )
+
+    def calculate_metrics(self, results: List[EvalResult]) -> BenchmarkMetrics:
+        """Compute Pass@k and per-μ accuracy from EvalResults."""
+        # Group by task_id
+        task_results: Dict[str, List[bool]] = {}
+        for r in results:
+            task_results.setdefault(r.task_id, []).append(r.is_correct)
+
+        totals = np.array([len(v) for v in task_results.values()])
+        corrects = np.array([sum(v) for v in task_results.values()])
+
+        k_values = self.config.get("k_values", self.config.get("evaluation", {}).get("k_values", [1]))
+        pass_at_k: Dict[str, float] = {}
+        for k in k_values:
+            if len(totals) > 0 and (totals >= k).all():
+                pass_at_k[f"pass@{k}"] = float(self._estimate_pass_at_k(totals, corrects, k).mean())
+
+        overall = pass_at_k.get("pass@1", float(corrects.sum()) / max(len(corrects), 1))
+
+        # per-μ breakdown (uses metadata set by the pipeline stage)
+        per_mu: Dict[float, float] = {}
+        mu_buckets: Dict[float, List[bool]] = {}
+        for r in results:
+            mu = r.metadata.get("miu")
+            if mu is not None:
+                mu_buckets.setdefault(mu, []).append(r.is_correct)
+        for mu, vals in mu_buckets.items():
+            per_mu[mu] = sum(vals) / len(vals)
+
+        return BenchmarkMetrics(
+            overall_score=overall,
+            per_mu=per_mu,
+            metadata=pass_at_k,
+        )
 
     # ========================================================================
     # STEP 1: LOAD TASKS
@@ -400,15 +527,12 @@ class HumanEvalBenchmark(BaseBenchmark):
                 "result": f"Error: {str(e)}"
             }
     
-    def calculate_metrics(self, results: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def _calculate_metrics_from_dicts(self, results: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
-        Calculate pass@k metrics from evaluation results.
-        
-        Args:
-            results: List of evaluation results
-            
-        Returns:
-            Dictionary with pass@k values
+        Calculate pass@k metrics from raw evaluation result dicts.
+
+        Used internally by run_full_pipeline (the legacy dict-based path).
+        The public calculate_metrics() accepts List[EvalResult] instead.
         """
         # Group results by task_id
         task_results = {}
@@ -423,18 +547,18 @@ class HumanEvalBenchmark(BaseBenchmark):
         for task_id, passed_list in task_results.items():
             total.append(len(passed_list))
             correct.append(sum(passed_list))
-        
+
         total = np.array(total)
         correct = np.array(correct)
-        
+
         # Calculate pass@k
         k_values = self.config.get("k_values", [1])
         metrics = {}
         for k in k_values:
-            if (total >= k).all():
+            if len(total) > 0 and (total >= k).all():
                 pass_at_k = self._estimate_pass_at_k(total, correct, k).mean()
                 metrics[f"pass@{k}"] = float(pass_at_k)
-        
+
         return metrics
 
     def _estimate_pass_at_k(self, n, c, k):
@@ -547,8 +671,8 @@ class HumanEvalBenchmark(BaseBenchmark):
                 self.logger.debug(f"  ⊗ {task_id} - DISTORTED code skipped (syntax invalid)")
         
         # Calculate metrics
-        original_metrics = self.calculate_metrics(original_results) if original_results else {"pass@1": 0.0}
-        distorted_metrics = self.calculate_metrics(distorted_results) if distorted_results else {"pass@1": 0.0}
+        original_metrics = self._calculate_metrics_from_dicts(original_results) if original_results else {"pass@1": 0.0}
+        distorted_metrics = self._calculate_metrics_from_dicts(distorted_results) if distorted_results else {"pass@1": 0.0}
         
         # Create summary
         summary = {

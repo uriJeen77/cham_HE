@@ -25,10 +25,11 @@ import tqdm
 
 from chameleon.distortion.constants import DEFAULT_MIU_VALUES, DEFAULT_DISTORTIONS_PER_QUESTION
 from chameleon.distortion.runner import DistortionRunner
-from chameleon.distortion.validator import reconstruct_humaneval_prompt
 from chameleon.evaluation.batch_processor import BatchProcessor, EvaluationConfig
 from chameleon.models.registry import get_backend, BackendType
 from chameleon.core.schemas import BackendType as EnumBackendType
+from benchmarks import get_benchmark
+from benchmarks.base.types import Task
 
 @dataclass
 class WorkflowConfig:
@@ -46,6 +47,12 @@ class WorkflowConfig:
     skip_generation: bool = False
     skip_evaluation: bool = False
     skip_analysis: bool = False
+    benchmark_type: str = "human_eval"
+    benchmark_config: Dict[str, Any] = None  # populated from config.yaml benchmark: section
+
+    def __post_init__(self):
+        if self.benchmark_config is None:
+            self.benchmark_config = {}
     
     @classmethod
     def from_project(cls, project_name: str, projects_dir: str = "Projects") -> "WorkflowConfig":
@@ -89,6 +96,10 @@ class WorkflowConfig:
         target_cfg = cfg.get("target_model", {})
         target_vendor = target_cfg.get("vendor", "openai")
         
+        # Benchmark config (new section; falls back to sensible defaults)
+        benchmark_cfg = cfg.get("benchmark", {})
+        benchmark_type = benchmark_cfg.get("type", cfg.get("benchmark_type", "human_eval"))
+
         return cls(
             project_name=project_name,
             project_dir=project_dir,
@@ -99,6 +110,8 @@ class WorkflowConfig:
             target_model=target_cfg.get("name", "gpt-4"),
             target_vendor=target_vendor,
             target_api_key=os.getenv("MISTRAL_API_KEY", ""), # Override: Use Mistral Key for target as well
+            benchmark_type=benchmark_type,
+            benchmark_config=benchmark_cfg,
         )
 
 
@@ -107,19 +120,24 @@ class ChameleonWorkflow:
     Orchestrates the complete Chameleon evaluation workflow.
     """
     
-    def __init__(self, config: WorkflowConfig):
+    def __init__(self, config: WorkflowConfig, benchmark=None):
         self.config = config
         self.original_data_dir = config.project_dir / "original_data"
         self.distorted_data_dir = config.project_dir / "distorted_data"
         self.results_dir = config.project_dir / "results"
         self.analysis_dir = config.project_dir / "analysis"
-        
+
         # Ensure directories exist
         for d in [self.distorted_data_dir, self.results_dir, self.analysis_dir]:
             d.mkdir(parents=True, exist_ok=True)
-            
+
         self.distorted_jsonl = self.distorted_data_dir / "distortions_complete.jsonl"
         self.samples_jsonl = self.distorted_data_dir / "samples.jsonl"
+
+        # Benchmark instance — drives prompts, evaluation, and metrics
+        self.benchmark = benchmark or get_benchmark(
+            config.benchmark_type, config.benchmark_config
+        )
     
     def run(self) -> Dict[str, Any]:
         """Run the complete workflow."""
@@ -135,8 +153,8 @@ class ChameleonWorkflow:
         print("=" * 70)
         
         try:
-            # Stage 1: Distort (implies Prepare)
-            if not self.config.skip_distortion:
+            # Stage 1: Distort
+            if not self.config.skip_distortion and self.benchmark.supports_stage("distort"):
                 print("\n" + "=" * 70)
                 print("🔄 STAGE 1: DISTORTION GENERATION")
                 print("=" * 70)
@@ -144,9 +162,9 @@ class ChameleonWorkflow:
             else:
                 print("\n⏭️ Skipping distortion stage")
                 results["stages"]["distort"] = {"skipped": True}
-            
+
             # Stage 2: Generate (Target Model Inference)
-            if not self.config.skip_generation:
+            if not self.config.skip_generation and self.benchmark.supports_stage("generate"):
                 print("\n" + "=" * 70)
                 print("⚡ STAGE 2: TARGET MODEL GENERATION")
                 print("=" * 70)
@@ -154,9 +172,9 @@ class ChameleonWorkflow:
             else:
                 print("\n⏭️ Skipping generation stage")
                 results["stages"]["generate"] = {"skipped": True}
-                
+
             # Stage 3: Evaluate (Functional Correctness)
-            if not self.config.skip_evaluation:
+            if not self.config.skip_evaluation and self.benchmark.supports_stage("evaluate"):
                 print("\n" + "=" * 70)
                 print("🎯 STAGE 3: FUNCTIONAL EVALUATION")
                 print("=" * 70)
@@ -164,9 +182,9 @@ class ChameleonWorkflow:
             else:
                 print("\n⏭️ Skipping evaluation stage")
                 results["stages"]["evaluate"] = {"skipped": True}
-            
+
             # Stage 4: Analyze
-            if not self.config.skip_analysis:
+            if not self.config.skip_analysis and self.benchmark.supports_stage("analyze"):
                 print("\n" + "=" * 70)
                 print("📊 STAGE 4: ANALYSIS")
                 print("=" * 70)
@@ -267,16 +285,22 @@ class ChameleonWorkflow:
             
             if not q_text or not d_id:
                 continue
-                
-            # Reconstruct prompt if needed (fix for missing signature/imports)
-            # This handles cases where distortion only contains the description
+
+            # Build a Task and let the benchmark determine the final prompt.
             original_prompt = row.get('question_text', '')
-            final_prompt = reconstruct_humaneval_prompt(str(original_prompt), str(q_text))
-            
+            task = Task(
+                task_id=str(d_id),
+                data={self.benchmark.get_field_to_distort(): str(original_prompt)},
+                distorted_text=str(q_text),
+                miu=float(row.get('miu', 0.0)),
+            )
+            gen_system_prompt, final_prompt = self.benchmark.get_generation_prompt(task)
+
             tasks_to_run.append({
                 "distortion_id": str(d_id),
                 "prompt": final_prompt,
-                "row_idx": idx
+                "system_prompt": gen_system_prompt,
+                "row_idx": idx,
             })
             
         print(f"Found {len(tasks_to_run)} tasks to generate.")
@@ -307,25 +331,14 @@ class ChameleonWorkflow:
         
         with open(self.samples_jsonl, 'a', encoding='utf-8') as f_out:
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                # Strict system prompt to ensure code-only output
-                system_prompt = (
-                    "You are an automated Python code completion engine. Your goal is to complete the provided function body based on its signature and docstring.\n\n"
-                    "STRICT OUTPUT RULES:\n"
-                    "1. Raw Code Only: Return only the valid Python code required to complete the function.\n"
-                    "2. No Markdown: Do NOT use markdown blocks (```python), backticks, or any formatting.\n"
-                    "3. No Chatter: Do NOT include conversational text (e.g., 'Here is the code', 'I have completed...'), explanations, or comments.\n"
-                    "4. No Repetition: Do not repeat the function signature unless necessary contextually.\n\n"
-                    "Your output will be executed directly. Any non-code text will cause the execution to fail."
-                )
-
                 future_to_task = {
                     executor.submit(
-                        backend.complete, 
-                        prompt=t["prompt"], 
-                        system_prompt=system_prompt,
-                        max_tokens=1024, 
+                        backend.complete,
+                        prompt=t["prompt"],
+                        system_prompt=t["system_prompt"],
+                        max_tokens=1024,
                         temperature=0.2
-                    ): t 
+                    ): t
                     for t in tasks_to_run
                 }
                 
@@ -349,21 +362,83 @@ class ChameleonWorkflow:
         return {"status": "complete", "generated": len(tasks_to_run)}
 
     def _stage_evaluate(self) -> Dict[str, Any]:
-        """Run functional evaluation."""
+        """
+        Run functional evaluation.
+
+        Joins samples.jsonl (task_id=distortion_id, completion) with
+        distortions_complete.jsonl (distortion_id -> question_id + original data)
+        so the benchmark receives a fully-populated Task including test cases.
+        """
         if not self.samples_jsonl.exists():
-             return {"skipped": True, "reason": "no_samples_file"}
-             
-        # Use BatchProcessor to run evaluation
-        config = EvaluationConfig(
-            project_dir=self.config.project_dir,
-            model=self.config.target_model
-        )
-        processor = BatchProcessor(config)
-        
-        # We need to point it to our samples.jsonl
-        # Note: batch_processor.py usually expects SAMPLE_FILE_PATH global or arg.
-        # We call evaluate with explicit file.
-        return processor.evaluate(sample_file=str(self.samples_jsonl), k=[1])
+            return {"skipped": True, "reason": "no_samples_file"}
+
+        # Load distortions metadata: distortion_id -> row
+        dist_map: Dict[str, Any] = {}
+        if self.distorted_jsonl.exists():
+            dist_df = pd.read_json(self.distorted_jsonl, orient='records', lines=True)
+            for _, row in dist_df.iterrows():
+                dist_map[str(row.get('distortion_id', ''))] = row.to_dict()
+
+        # Load original benchmark tasks (for test cases / canonical answers)
+        data_path = self.config.benchmark_config.get("data_path", "")
+        original_tasks: Dict[str, Task] = {}
+        if data_path:
+            resolved = Path(data_path)
+            if not resolved.is_absolute():
+                resolved = Path(__file__).parent.parent / data_path
+            if resolved.exists():
+                for t in self.benchmark.load_data(str(resolved)):
+                    original_tasks[t.task_id] = t
+
+        # Evaluate each sample
+        result_path = Path(str(self.samples_jsonl) + "_results.jsonl")
+        eval_results = []
+
+        with open(self.samples_jsonl, 'r', encoding='utf-8') as f_in, \
+             open(result_path, 'w', encoding='utf-8') as f_out:
+            for line in f_in:
+                if not line.strip():
+                    continue
+                sample = json.loads(line)
+                distortion_id = sample['task_id']
+                completion = sample.get('completion', '')
+
+                dist_row = dist_map.get(distortion_id, {})
+                q_id = str(dist_row.get('question_id', distortion_id))
+                miu = float(dist_row.get('miu', 0.0))
+
+                orig_task = original_tasks.get(q_id)
+                if orig_task is not None:
+                    task = Task(
+                        task_id=distortion_id,
+                        data=dict(orig_task.data),
+                        distorted_text=dist_row.get('distorted_question'),
+                        miu=miu,
+                    )
+                else:
+                    # Fallback: build minimal task from distortion row
+                    task = Task(
+                        task_id=distortion_id,
+                        data={'task_id': q_id, 'prompt': dist_row.get('question_text', '')},
+                        distorted_text=dist_row.get('distorted_question'),
+                        miu=miu,
+                    )
+
+                eval_result = self.benchmark.evaluate(task, completion)
+                # Attach miu for per-μ metric computation
+                eval_result.metadata['miu'] = miu
+
+                result_entry = {
+                    'task_id': distortion_id,
+                    'passed': eval_result.is_correct,
+                    **eval_result.metadata,
+                }
+                f_out.write(json.dumps(result_entry) + '\n')
+                eval_results.append(eval_result)
+
+        passed = sum(1 for r in eval_results if r.is_correct)
+        print(f"Evaluated {len(eval_results)} samples — {passed} passed ({passed/max(len(eval_results),1)*100:.1f}%)")
+        return {'status': 'complete', 'evaluated': len(eval_results), 'passed': passed}
 
     def _stage_analyze(self) -> Dict[str, Any]:
         """Analyze results."""

@@ -137,6 +137,13 @@ class DistortionConfig:
     save_interval: int = BATCH_DEFAULTS["save_interval"]
     timeout: int = API_DEFAULTS["mistral"]["timeout"]
 
+    # Optional benchmark-provided prompt factory.
+    # Signature: (question_text: str, miu: float, n_distortions: int) -> DistortionPrompt
+    # When set, the runner uses this to build distortion prompts instead of the
+    # generic get_batch_distortion_prompt fallback.  When None, existing behaviour
+    # is preserved exactly.
+    prompt_factory: Optional[Callable] = None
+
 
 @dataclass
 class DistortionProgress:
@@ -1549,17 +1556,31 @@ class DistortionRunner:
     def _call_api(self, questions: List[Dict], miu: float, attempt: int = 1) -> tuple:
         """Make API call to distortion model."""
         try:
-            prompt = get_batch_distortion_prompt(questions, miu, self.config.distortions_per_question)
-            
-            # Calculate max_tokens dynamically based on questions, N distortions, and miu
-            max_tokens = calculate_max_tokens(questions, self.config.distortions_per_question, miu)
-            
+            N = self.config.distortions_per_question
+            max_tokens = calculate_max_tokens(questions, N, miu)
+
+            if self.config.prompt_factory is not None:
+                # Use benchmark-provided prompt factory (one question at a time).
+                # The factory returns a DistortionPrompt with both system and user parts.
+                assert len(questions) == 1, (
+                    "prompt_factory mode requires questions_per_batch=1; "
+                    f"got {len(questions)} questions in a single _call_api call"
+                )
+                dp = self.config.prompt_factory(questions[0]['text'], miu, N)
+                messages = [
+                    {"role": "system", "content": dp.system_prompt},
+                    {"role": "user", "content": dp.user_prompt},
+                ]
+            else:
+                prompt = get_batch_distortion_prompt(questions, miu, N)
+                messages = [{"role": "user", "content": prompt}]
+
             response = requests.post(
                 self.api_url,
                 headers={"Authorization": f"Bearer {self.config.api_key}", "Content-Type": "application/json"},
                 json={
                     "model": self.config.model,
-                    "messages": [{"role": "user", "content": prompt}],
+                    "messages": messages,
                     "max_tokens": max_tokens,
                     "temperature": calculate_temperature(miu)
                 },
