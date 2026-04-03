@@ -50,6 +50,24 @@ class BenchmarkType(str, Enum):
     # Future benchmarks (e.g., BIG-bench, MBPP) can be added here
 
 
+class BenchmarkConfig(BaseModel):
+    """
+    Per-benchmark configuration stored under the 'benchmark:' key in config.yaml.
+
+    `type`            — registry key matching BENCHMARK_REGISTRY in benchmarks/__init__.py
+    `data_path`       — path to the benchmark data file (absolute or relative to repo root)
+    `field_to_distort`— which field in the dataset record to distort (default: "prompt")
+    `evaluation`      — benchmark-specific evaluation parameters (timeout, k_values, …)
+    """
+
+    type: str = Field(default="human_eval")
+    data_path: Optional[str] = Field(default=None)
+    field_to_distort: str = Field(default="prompt")
+    evaluation: Dict[str, Any] = Field(default_factory=dict)
+
+    model_config = {'protected_namespaces': ()}
+
+
 class DistortionEngineConfig(BaseModel):
     """
     Configuration for the distortion generation engine.
@@ -197,7 +215,10 @@ class ProjectConfig(BaseModel):
     
     # Distortion settings
     distortion_config: DistortionConfig = Field(default_factory=DistortionConfig)
-    
+
+    # Benchmark-specific configuration
+    benchmark: BenchmarkConfig = Field(default_factory=BenchmarkConfig)
+
     # Data schema
     data_schema: DataSchema = Field(default_factory=DataSchema)
     

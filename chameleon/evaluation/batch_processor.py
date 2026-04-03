@@ -72,9 +72,11 @@ class BatchProcessor:
     Generic processor that evaluates model completions using a specific benchmark.
     """
 
-    def __init__(self, config: EvaluationConfig):
+    def __init__(self, config: EvaluationConfig, benchmark=None):
         self.config = config
-        self.benchmark = get_benchmark(config.benchmark_type, {"timeout": 3.0})
+        # Accept an externally-created benchmark so the caller (e.g. ChameleonWorkflow)
+        # can share a single instance rather than constructing a second one.
+        self.benchmark = benchmark or get_benchmark(config.benchmark_type, {"timeout": 3.0})
 
     def evaluate(
         self,
