@@ -10,6 +10,7 @@ from pathlib import Path
 import json
 import os
 import ast
+import time
 import numpy as np
 import logging
 
@@ -87,14 +88,28 @@ class HumanEvalBenchmark(BaseBenchmark):
         """Setup logger for the pipeline."""
         logger = logging.getLogger("HumanEvalBenchmark")
         logger.setLevel(logging.INFO)
-        
+
         if not logger.handlers:
             handler = logging.StreamHandler()
             formatter = logging.Formatter('%(levelname)s - %(message)s')
             handler.setFormatter(formatter)
             logger.addHandler(handler)
-        
+
         return logger
+
+    def _call_with_retry(self, fn, *args, max_retries=5, base_delay=10, **kwargs):
+        """Call fn with exponential backoff on 429 rate-limit errors."""
+        for attempt in range(max_retries):
+            try:
+                return fn(*args, **kwargs)
+            except Exception as e:
+                if "429" in str(e) or "rate_limited" in str(e).lower():
+                    delay = base_delay * (2 ** attempt)
+                    self.logger.warning(f"Rate limited — retrying in {delay}s (attempt {attempt+1}/{max_retries})")
+                    time.sleep(delay)
+                else:
+                    raise
+        return fn(*args, **kwargs)
 
     # ========================================================================
     # AbstractBenchmark interface — thin adapters over the existing pipeline
@@ -281,7 +296,8 @@ class HumanEvalBenchmark(BaseBenchmark):
                 user_prompt = get_distortion_prompt(original_prompt, miu, n_distortions=1)
                 
                 # Run distortion with custom prompts
-                dist_result = distorter.distort_question(
+                dist_result = self._call_with_retry(
+                    distorter.distort_question,
                     question_id=task_id,
                     question=original_prompt,
                     miu=miu,
@@ -354,10 +370,11 @@ class HumanEvalBenchmark(BaseBenchmark):
                 user_prompt = get_validation_prompt(original, distorted)
                 
                 # Call API
-                response = client.chat.complete(
+                response = self._call_with_retry(
+                    client.chat.complete,
                     model=model,
                     messages=[{"role": "user", "content": user_prompt}],
-                    response_format={"type": "json_object"}
+                    response_format={"type": "json_object"},
                 )
                 
                 result = json.loads(response.choices[0].message.content)
@@ -433,10 +450,11 @@ class HumanEvalBenchmark(BaseBenchmark):
                 full_prompt = get_generation_prompt(prompt)
                 
                 # Send request to Mistral
-                response = client.chat.complete(
+                response = self._call_with_retry(
+                    client.chat.complete,
                     model=model,
                     messages=[{"role": "user", "content": full_prompt}],
-                    temperature=0.2
+                    temperature=0.2,
                 )
                 
                 code = response.choices[0].message.content

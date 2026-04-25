@@ -13,7 +13,7 @@ from benchmarks.human_eval.human_eval import run_humaneval_pipeline
 
 # Ensure the results directory exists
 script_dir = Path(__file__).parent
-output_dir = r"C:\Users\urile\OneDrive - BGU\cham_HE\cham_HE\benchmarks\human_eval\results"
+output_dir = str(script_dir / "results")
 os.makedirs(output_dir, exist_ok=True)
 
 # Run a small test on 5 samples

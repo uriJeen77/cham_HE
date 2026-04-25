@@ -25,7 +25,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
-import torch  # Local engines rely on torch; imported once at module level
+try:
+    import torch  # Local engines rely on torch; imported once at module level
+except ImportError:
+    torch = None
 
 from chameleon.distortion.constants import (
     DISTORTION_SYSTEM_PROMPT,
